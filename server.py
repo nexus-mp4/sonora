@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hmac
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -106,6 +107,7 @@ def yt() -> YTMusic:
 def reset_client() -> None:
     with _lock:
         _state.update(yt=None, auth=False)
+    _stream_cache.clear()
 
 
 def need_auth() -> YTMusic:
@@ -558,6 +560,31 @@ _stream_cache: dict[str, tuple[str, float]] = {}
 _stream_hdrs: dict[str, dict] = {}
 
 
+def cookie_file() -> str:
+    """cookies.txt for yt-dlp: YTDLP_COOKIES if given, otherwise built from the signed-in browser.json."""
+    if COOKIES:
+        return COOKIES
+    if not AUTH_FILE.exists():
+        return ""
+    try:
+        data = json.loads(AUTH_FILE.read_text())
+        raw = next((v for k, v in data.items() if k.lower() == "cookie"), "")
+        if not raw:
+            return ""
+        out = Path(tempfile.gettempdir()) / "sonora-account-cookies.txt"
+        lines = ["# Netscape HTTP Cookie File"]
+        for part in raw.split(";"):
+            if "=" in part:
+                name, value = part.strip().split("=", 1)
+                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
+        out.write_text("\n".join(lines) + "\n")
+        os.chmod(out, 0o600)
+        return str(out)
+    except Exception:  # noqa: BLE001
+        app.logger.warning("could not build cookies from browser.json", exc_info=True)
+        return ""
+
+
 def resolve_stream(vid: str) -> str:
     now = time.time()
     hit = _stream_cache.get(vid)
@@ -572,8 +599,11 @@ def resolve_stream(vid: str) -> str:
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio/best",
     }
-    if COOKIES:
-        opts["cookiefile"] = COOKIES
+    cf = cookie_file()
+    if cf:
+        opts["cookiefile"] = cf
+    if os.environ.get("YTDLP_BROWSER"):  # e.g. "chrome" or "firefox", for local runs
+        opts["cookiesfrombrowser"] = (os.environ["YTDLP_BROWSER"],)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"https://music.youtube.com/watch?v={vid}", download=False)
     url = info["url"]
@@ -628,7 +658,7 @@ def _short(e) -> str:
     msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
     msg = re.sub(r"^\[youtube[^\]]*\]\s*\S+:\s*", "", msg).strip().splitlines()[0][:220] if msg.strip() else type(e).__name__
     if "not a bot" in msg or "Sign in to confirm" in msg:
-        msg += " (YouTube is blocking this IP: provide cookies via YTDLP_COOKIES)"
+        msg += " (YouTube wants a signed-in session: sign in to YouTube Music in Settings, or set YTDLP_COOKIES)"
     return msg
 
 
