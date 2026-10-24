@@ -1,5 +1,5 @@
 flask>=3.0
 ytmusicapi>=1.8
-yt-dlp
+yt-dlp[default]
 requests
 gunicorn>=22
