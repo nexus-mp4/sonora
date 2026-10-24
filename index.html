@@ -844,7 +844,7 @@ A.addEventListener('ended',()=>next(true));
 A.addEventListener('loadedmetadata',()=>{const t=S.cur;if(t&&isFinite(A.duration)&&Math.abs((t.dur||0)-A.duration)>1){t.dur=A.duration;$('#b-t1').textContent=$('#n-t1').textContent=fmt(t.dur);if(t.src!=='yt')DB.set('tracks',t.id,t)}if('mediaSession'in navigator)try{navigator.mediaSession.setPositionState({duration:A.duration,position:0,playbackRate:1})}catch{}});
 A.addEventListener('playing',()=>{S.errN=0});
 A.addEventListener('error',()=>{if(!A.getAttribute('src'))return;if((S.errN=(S.errN||0)+1)>=4){toast('Playback keeps failing, so I stopped. Is the server running?');return}
-  toast(S.cur&&S.cur.src==='yt'?'Couldn’t stream that song. Skipping.':'This file can’t be played in the browser. Skipping.');setTimeout(()=>next(true),700)});
+  if(S.cur&&S.cur.src==='yt'){toast('Couldn’t stream that song. Checking why…');fetch('/api/diag/'+S.cur.vid).then(r=>r.json()).then(j=>toast('Couldn’t stream that song: '+(j.error||'unknown reason')),()=>toast('Couldn’t stream that song: the server isn’t reachable.'))}else toast('This file can’t be played in the browser. Skipping.');setTimeout(()=>next(true),700)});
 
 /* ---------- lyrics (embedded tag, or LRCLIB) ---------- */
 function parseLrc(s){if(!s)return[];const out=[];for(const line of s.split(/\r?\n/)){const m=[...line.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)],text=line.replace(/\[[^\]]*\]/g,'').trim();m.forEach(x=>out.push({t:+x[1]*60+ +x[2],s:text}))}return out.sort((a,b)=>a.t-b.t)}
