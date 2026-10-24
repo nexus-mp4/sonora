@@ -11,9 +11,12 @@ Run:  python3 server.py   then open http://localhost:8000
 """
 from __future__ import annotations
 
+import hmac
 import importlib.util
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 from functools import wraps
@@ -35,10 +38,41 @@ AUTH_FILE = ROOT / "browser.json"
 LANGUAGE = os.environ.get("YTM_LANGUAGE", "en")
 LOCATION = os.environ.get("YTM_LOCATION", "")  # ISO country code, e.g. "US"; empty = default
 CHARTS_COUNTRY = os.environ.get("YTM_COUNTRY", "ZZ")  # "ZZ" = global charts
+# --- hosting (Render etc.) -------------------------------------------------------
+ON_HOST = bool(os.environ.get("RENDER") or os.environ.get("PORT"))
+# Stream URLs from YouTube are tied to the IP that requested them. On a server the browser has a
+# different IP, so audio must be relayed ("proxy"). Locally a plain redirect is lighter.
+STREAM_MODE = os.environ.get("STREAM_MODE") or ("proxy" if ON_HOST else "redirect")
+PASSWORD = os.environ.get("SONORA_PASSWORD", "")  # set this on any public deployment
+AUTH_ENV = os.environ.get("YTM_BROWSER_JSON", "")  # contents of browser.json, as a secret env var
+if AUTH_ENV:  # hosts have throwaway disks, so the account comes from the environment
+    AUTH_FILE = Path(tempfile.gettempdir()) / "sonora-browser.json"
+    AUTH_FILE.write_text(AUTH_ENV)
+    os.chmod(AUTH_FILE, 0o600)
+COOKIES = os.environ.get("YTDLP_COOKIES", "")
+if COOKIES and Path(COOKIES).is_file():  # secret files are read-only; yt-dlp wants to write back
+    _c = Path(tempfile.gettempdir()) / "sonora-cookies.txt"
+    shutil.copy(COOKIES, _c)
+    COOKIES = str(_c)
 AUDIO_EXT = {".mp3", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wav", ".weba", ".webm", ".mp4"}
 
 app = Flask(__name__)
 _http = requests.Session()
+
+
+@app.before_request
+def gate():
+    if not PASSWORD or request.path == "/healthz":
+        return None
+    a = request.authorization
+    if a and hmac.compare_digest((a.password or "").encode(), PASSWORD.encode()):
+        return None
+    return Response("Password required", 401, {"WWW-Authenticate": 'Basic realm="Sonora"'})
+
+
+@app.get("/healthz")
+def healthz():
+    return "ok"
 
 # --------------------------------------------------------------------------- client
 
@@ -459,6 +493,8 @@ def playlist_add():
 @app.post("/api/auth")
 @api
 def auth_set():
+    if AUTH_ENV:
+        raise ValueError("Sign-in is set by the YTM_BROWSER_JSON environment variable on the server.")
     raw = ((request.get_json(silent=True) or {}).get("headers") or "").strip()
     if not raw:
         raise ValueError("Paste the request headers first.")
@@ -484,6 +520,8 @@ def auth_set():
 @app.delete("/api/auth")
 @api
 def auth_clear():
+    if AUTH_ENV:
+        raise ValueError("Sign-in is set by the YTM_BROWSER_JSON environment variable on the server.")
     AUTH_FILE.unlink(missing_ok=True)
     reset_client()
     return {"ok": True}
@@ -517,6 +555,7 @@ def img():
 # --- audio ------------------------------------------------------------------------
 
 _stream_cache: dict[str, tuple[str, float]] = {}
+_stream_hdrs: dict[str, dict] = {}
 
 
 def resolve_stream(vid: str) -> str:
@@ -533,11 +572,12 @@ def resolve_stream(vid: str) -> str:
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio/best",
     }
-    if os.environ.get("YTDLP_COOKIES"):
-        opts["cookiefile"] = os.environ["YTDLP_COOKIES"]
+    if COOKIES:
+        opts["cookiefile"] = COOKIES
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"https://music.youtube.com/watch?v={vid}", download=False)
     url = info["url"]
+    _stream_hdrs[vid] = info.get("http_headers") or {}
     m = re.search(r"[?&]expire=(\d+)", url)
     expires = int(m.group(1)) - 300 if m else now + 3 * 3600
     if len(_stream_cache) > 300:
@@ -546,10 +586,35 @@ def resolve_stream(vid: str) -> str:
     return url
 
 
+def proxy_stream(vid: str, url: str):
+    """Relay audio bytes (with Range support so seeking works)."""
+    h = {k: v for k, v in (_stream_hdrs.get(vid) or {}).items() if k.lower() in ("user-agent", "accept", "accept-language")}
+    if request.headers.get("Range"):
+        h["Range"] = request.headers["Range"]
+    r = _http.get(url, headers=h, stream=True, timeout=20)
+    if r.status_code >= 400:
+        _stream_cache.pop(vid, None)
+        r.close()
+        return jsonify(error=f"YouTube refused the audio request ({r.status_code})."), 502
+    out = {k: r.headers[k] for k in ("Content-Type", "Content-Length", "Content-Range") if k in r.headers}
+    out["Accept-Ranges"] = "bytes"
+
+    def body():
+        try:
+            yield from r.iter_content(64 * 1024)
+        finally:
+            r.close()
+
+    return Response(body(), status=r.status_code, headers=out)
+
+
 @app.get("/api/stream/<vid>")
 def stream(vid):
     try:
-        return redirect(resolve_stream(check_vid(vid)), code=302)
+        url = resolve_stream(check_vid(vid))
+        if STREAM_MODE != "proxy":
+            return redirect(url, code=302)
+        return proxy_stream(vid, url)
     except ValueError:
         abort(400)
     except ImportError:
@@ -607,7 +672,7 @@ def favicon():
 
 
 if __name__ == "__main__":
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0" if ON_HOST else "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
     if importlib.util.find_spec("yt_dlp") is None:
         print("! yt-dlp is not installed: browsing works, but songs will not play. pip install yt-dlp")
