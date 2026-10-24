@@ -624,6 +624,42 @@ def stream(vid):
         return jsonify(error=str(e)), 502
 
 
+def _short(e) -> str:
+    msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
+    msg = re.sub(r"^\[youtube[^\]]*\]\s*\S+:\s*", "", msg).strip().splitlines()[0][:220] if msg.strip() else type(e).__name__
+    if "not a bot" in msg or "Sign in to confirm" in msg:
+        msg += " (YouTube is blocking this IP: provide cookies via YTDLP_COOKIES)"
+    return msg
+
+
+@app.get("/api/diag/<vid>")
+def diag(vid):
+    """Says why a song can't be streamed (shown by the app when playback fails)."""
+    try:
+        check_vid(vid)
+        import yt_dlp  # noqa: F401
+    except ImportError:
+        return jsonify(ok=False, error="yt-dlp isn't installed on the server")
+    except ValueError:
+        return jsonify(ok=False, error="bad video id")
+    try:
+        url = resolve_stream(vid)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("diag resolve failed for %s: %s", vid, e)
+        return jsonify(ok=False, stage="resolve", error=_short(e))
+    try:
+        h = {k: v for k, v in (_stream_hdrs.get(vid) or {}).items() if k.lower() == "user-agent"}
+        r = _http.get(url, headers={**h, "Range": "bytes=0-1"}, timeout=15, stream=True)
+        code = r.status_code
+        r.close()
+    except requests.RequestException as e:
+        return jsonify(ok=False, stage="fetch", error=f"couldn't download audio: {type(e).__name__}")
+    if code >= 400:
+        _stream_cache.pop(vid, None)
+        return jsonify(ok=False, stage="fetch", error=f"YouTube refused the audio download (HTTP {code})")
+    return jsonify(ok=True)
+
+
 @app.get("/api/warm/<vid>")
 def warm(vid):
     """Resolve the next track ahead of time so it starts instantly."""
