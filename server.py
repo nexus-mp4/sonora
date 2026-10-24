@@ -599,6 +599,10 @@ def resolve_stream(vid: str) -> str:
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio/best",
     }
+    # Recent YouTube needs a JavaScript runtime (deno or node) to unlock audio formats.
+    if not shutil.which("deno") and shutil.which("node"):
+        opts["js_runtimes"] = {"node": {}}
+    opts["remote_components"] = ["ejs:github"]  # downloads the challenge solver (ignored by old yt-dlp)
     cf = cookie_file()
     if cf:
         opts["cookiefile"] = cf
@@ -657,6 +661,8 @@ def stream(vid):
 def _short(e) -> str:
     msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
     msg = re.sub(r"^\[youtube[^\]]*\]\s*\S+:\s*", "", msg).strip().splitlines()[0][:220] if msg.strip() else type(e).__name__
+    if "format is not available" in msg.lower():
+        msg += " (update yt-dlp: pip install -U 'yt-dlp[default]', and make sure node or deno is installed)"
     if "not a bot" in msg or "Sign in to confirm" in msg:
         msg += " (YouTube wants a signed-in session: sign in to YouTube Music in Settings, or set YTDLP_COOKIES)"
     return msg
