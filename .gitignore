@@ -1,0 +1,5 @@
+browser.json
+browser.json.tmp
+cookies.txt
+__pycache__/
+.venv/
